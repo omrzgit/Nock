@@ -56,6 +56,7 @@ const T_STATS: usize = 18;
 const T_GAME: usize = 19;
 const T_WATER: usize = 20;
 const T_EYES: usize = 21;
+const T_IDLE: usize = 24;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -225,6 +226,9 @@ pub struct App {
     pub displays: Vec<sys::DisplayInfo>,
     pub filter_active: bool,
     pub filter_pct: u32,
+    pub idle_dimmed: bool,
+    pub pre_idle_bri: Option<u32>,
+    pub pre_idle_displays: Vec<u32>,
     bri_asked: bool,
 
     // clipboard
@@ -388,6 +392,9 @@ impl App {
             displays: Vec::new(),
             filter_active: false,
             filter_pct: 30,
+            idle_dimmed: false,
+            pre_idle_bri: None,
+            pre_idle_displays: Vec::new(),
             bri_asked: false,
             clips: Vec::new(),
             pins: store::load_pins(),
@@ -464,6 +471,13 @@ impl App {
         let (w, h) = a.target_size();
         a.sw = Spring::new(w);
         a.sh = Spring::new(h);
+        crate::filter::set_filter_tint(a.cfg.filter_amber);
+        if a.cfg.remember_bri {
+            a.filter_pct = a.cfg.saved_filter_pct as u32;
+        }
+        if a.cfg.oled_idle_min > 0 {
+            a.set_timer(T_IDLE, 3000);
+        }
         Ok(a)
     }
 
@@ -761,6 +775,7 @@ impl App {
             T_WATER => self.water_reminder(),
             T_EYES => self.eye_reminder(),
             T_STATS => self.on_stats_tick(),
+            T_IDLE => self.on_idle_tick(),
             T_FSCHK => {
                 self.kill_timer(T_FSCHK);
                 self.on_foreground();
@@ -1947,6 +1962,19 @@ impl App {
             self.all_brightness = self.brightness;
         }
         self.displays = sys::display_monitors();
+        if self.cfg.remember_bri {
+            for d in &mut self.displays {
+                if d.is_internal && self.cfg.saved_bri_internal > 0 {
+                    d.brightness = self.cfg.saved_bri_internal as u32;
+                    sys::brightness_set_internal(d.brightness);
+                } else if !d.is_internal && self.cfg.saved_bri_external > 0 {
+                    d.brightness = self.cfg.saved_bri_external as u32;
+                    if let Some(ext_idx) = d.external_idx {
+                        sys::brightness_set_external(ext_idx, d.brightness);
+                    }
+                }
+            }
+        }
         if self.expanded && self.page == Page::Controls {
             self.render();
         }
@@ -1961,6 +1989,11 @@ impl App {
             d.brightness = pct;
         }
         sys::brightness_set_all(pct);
+        if self.cfg.remember_bri {
+            self.cfg.saved_bri_internal = pct as u8;
+            self.cfg.saved_bri_external = pct as u8;
+            store::save_config(&self.cfg);
+        }
     }
 
     pub fn set_display_bri(&mut self, idx: usize, pct: u32) {
@@ -1968,8 +2001,16 @@ impl App {
             d.brightness = pct;
             if d.is_internal {
                 sys::brightness_set_internal(pct);
+                if self.cfg.remember_bri {
+                    self.cfg.saved_bri_internal = pct as u8;
+                    store::save_config(&self.cfg);
+                }
             } else if let Some(ext_idx) = d.external_idx {
                 sys::brightness_set_external(ext_idx, pct);
+                if self.cfg.remember_bri {
+                    self.cfg.saved_bri_external = pct as u8;
+                    store::save_config(&self.cfg);
+                }
             }
         } else if self.displays.is_empty() {
             sys::brightness_set_all(pct);
@@ -1991,11 +2032,105 @@ impl App {
             d.brightness = d_next;
         }
         sys::brightness_set_all(next);
+        if self.cfg.remember_bri {
+            self.cfg.saved_bri_internal = next as u8;
+            self.cfg.saved_bri_external = next as u8;
+            store::save_config(&self.cfg);
+        }
         self.render_bar();
         if self.expanded && self.page == Page::Controls {
             self.render();
         }
         self.on_pop_data();
+    }
+
+    pub fn on_idle_tick(&mut self) {
+        if self.cfg.oled_idle_min == 0 {
+            if self.idle_dimmed {
+                self.restore_idle_dim();
+            }
+            return;
+        }
+        let idle_secs = sys::get_idle_seconds();
+        let threshold = (self.cfg.oled_idle_min as u32) * 60;
+        if idle_secs >= threshold {
+            if !self.idle_dimmed {
+                self.apply_idle_dim();
+            }
+        } else if self.idle_dimmed {
+            self.restore_idle_dim();
+        }
+    }
+
+    pub fn apply_idle_dim(&mut self) {
+        self.idle_dimmed = true;
+        self.pre_idle_bri = self.all_brightness.or(self.brightness);
+        self.pre_idle_displays = self.displays.iter().map(|d| d.brightness).collect();
+        let target = self.cfg.oled_idle_target as u32;
+        sys::brightness_set_all(target);
+        if self.expanded && self.page == Page::Controls {
+            self.render();
+        }
+        self.on_pop_data();
+    }
+
+    pub fn restore_idle_dim(&mut self) {
+        self.idle_dimmed = false;
+        if let Some(target) = self.pre_idle_bri.take() {
+            if !self.pre_idle_displays.is_empty() && self.pre_idle_displays.len() == self.displays.len() {
+                for (i, &b) in self.pre_idle_displays.iter().enumerate() {
+                    if let Some(d) = self.displays.get_mut(i) {
+                        d.brightness = b;
+                    }
+                    if let Some(d) = self.displays.get(i) {
+                        if d.is_internal {
+                            sys::brightness_set_internal(b);
+                        } else if let Some(ext_idx) = d.external_idx {
+                            sys::brightness_set_external(ext_idx, b);
+                        }
+                    }
+                }
+                self.brightness = Some(target);
+                self.all_brightness = Some(target);
+            } else {
+                self.set_all_bri(target);
+            }
+        }
+        self.pre_idle_displays.clear();
+        if self.expanded && self.page == Page::Controls {
+            self.render();
+        }
+        self.on_pop_data();
+    }
+
+    pub fn toggle_filter_amber(&mut self) {
+        self.cfg.filter_amber = !self.cfg.filter_amber;
+        store::save_config(&self.cfg);
+        crate::filter::set_filter_tint(self.cfg.filter_amber);
+        self.on_pop_data();
+    }
+
+    pub fn toggle_remember_bri(&mut self) {
+        self.cfg.remember_bri = !self.cfg.remember_bri;
+        store::save_config(&self.cfg);
+    }
+
+    pub fn set_oled_idle_min(&mut self, min: u8) {
+        self.cfg.oled_idle_min = min;
+        store::save_config(&self.cfg);
+        if min > 0 {
+            self.set_timer(T_IDLE, 3000);
+        } else {
+            self.kill_timer(T_IDLE);
+            if self.idle_dimmed {
+                self.restore_idle_dim();
+            }
+        }
+    }
+
+    pub fn set_bri_step(&mut self, step: u8) {
+        self.cfg.bri_step = step.clamp(1, 50);
+        store::save_config(&self.cfg);
     }
 
     /// Ask for the brightness once so the top bar knows whether to show the icon.

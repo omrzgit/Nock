@@ -13,7 +13,7 @@ use crate::gfx::*;
 use crate::sys;
 
 const POP_W: f32 = 300.0;
-const POP_MAX_H: f32 = 460.0;
+const POP_MAX_H: f32 = 520.0;
 const GAP: f32 = 4.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const T_POPLEAVE: usize = 7;
@@ -55,6 +55,8 @@ fn spinner(g: &Gfx, cx: f32, cy: f32, phase: u32, c: Color) {
 #[derive(Clone, Copy)]
 enum PopAct {
     Toggle(u8), // 0 = Wi-Fi, 1 = Bluetooth, 2 = Night Filter
+    ToggleTint,
+    TurnOffDisplays,
     Mute,
     Vol(Rect),
     BriAll(Rect),
@@ -919,8 +921,44 @@ impl App {
                     }));
                     y += 32.0;
                     ops.push(note(format!("Darkness {}%", filter_pct), y - 4.0, th.t2));
-                    y += 22.0;
+                    y += 24.0;
+                    let is_amber = self.cfg.filter_amber;
+                    ops.push(Box::new(move |g, h, hot| {
+                        let r = Rect::new(20.0, y, w - 40.0, 24.0);
+                        let idx = h.len();
+                        if hot == Some(idx) {
+                            g.fill_rrect(r, 6.0, th.hover);
+                        }
+                        g.text(
+                            if is_amber { "Tint: Warm Amber (Night)" } else { "Tint: Neutral Dark" },
+                            Rect::new(28.0, y + 2.0, w - 56.0, 20.0),
+                            &g.fonts.small,
+                            if is_amber { Color(0.95, 0.65, 0.25, 1.0) } else { th.t2 },
+                            Align::Left,
+                        );
+                        h.push((r, PopAct::ToggleTint));
+                    }));
+                    y += 28.0;
                 }
+
+                ops.push(line(y));
+                y += 10.0;
+                ops.push(Box::new(move |g, h, hot| {
+                    let r = Rect::new(20.0, y, w - 40.0, 26.0);
+                    let idx = h.len();
+                    if hot == Some(idx) {
+                        g.fill_rrect(r, 6.0, th.hover);
+                    }
+                    g.text(
+                        "☾  Turn off displays",
+                        Rect::new(28.0, y + 3.0, w - 56.0, 20.0),
+                        &g.fonts.small,
+                        th.t2,
+                        Align::Left,
+                    );
+                    h.push((r, PopAct::TurnOffDisplays));
+                }));
+                y += 30.0;
             }
             BarAct::Battery => {
                 ops.push(title("Battery", y));
@@ -1116,6 +1154,10 @@ impl App {
                             if self.filter_active {
                                 crate::filter::set_filter(true, pct);
                             }
+                            if self.cfg.remember_bri {
+                                self.cfg.saved_filter_pct = pct as u8;
+                                crate::store::save_config(&self.cfg);
+                            }
                         } else if is_all {
                             let v = ((x - r.x) / r.w).clamp(0.0, 1.0);
                             let pct = (v * 100.0).round() as u32;
@@ -1209,6 +1251,10 @@ impl App {
                     if self.filter_active {
                         crate::filter::set_filter(true, pct);
                     }
+                    if self.cfg.remember_bri {
+                        self.cfg.saved_filter_pct = pct as u8;
+                        crate::store::save_config(&self.cfg);
+                    }
                     self.render_pop();
                 }
                 LRESULT(0)
@@ -1254,6 +1300,14 @@ impl App {
                         self.filter_active = !self.filter_active;
                         crate::filter::set_filter(self.filter_active, self.filter_pct);
                         self.render_pop();
+                    }
+                    Some(PopAct::ToggleTint) => {
+                        self.toggle_filter_amber();
+                        self.render_pop();
+                    }
+                    Some(PopAct::TurnOffDisplays) => {
+                        self.close_pop();
+                        sys::turn_off_screens();
                     }
                     Some(PopAct::Toggle(i)) => {
                         self.do_act(Act::Quick(i), 0.0);
@@ -1378,6 +1432,55 @@ impl App {
                 if self.pw.is_some() {
                     self.end_pw(false);
                     self.render_pop();
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let delta = ((wp.0 >> 16) & 0xffff) as u16 as i16 as i32;
+                let is_shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 };
+                let step = if is_shift { 1 } else { self.cfg.bri_step as i32 };
+                let change = if delta > 0 { step } else { -step };
+                if self.pop_kind() == Some(BarAct::Brightness) {
+                    let mut handled = false;
+                    if let Some(p) = self.pop.as_ref() {
+                        if let Some((_, act)) = p.hits.iter().find(|(r, _)| r.contains(x, y)) {
+                            match *act {
+                                PopAct::Bri(idx, _) => {
+                                    if let Some(d) = self.displays.get(idx) {
+                                        let next = (d.brightness as i32 + change).clamp(0, 100) as u32;
+                                        self.set_display_bri(idx, next);
+                                        handled = true;
+                                    }
+                                }
+                                PopAct::FilterBri(_) => {
+                                    let next = (self.filter_pct as i32 + change).clamp(0, 70) as u32;
+                                    self.filter_pct = next;
+                                    if self.filter_active {
+                                        crate::filter::set_filter(true, next);
+                                    }
+                                    if self.cfg.remember_bri {
+                                        self.cfg.saved_filter_pct = next as u8;
+                                        crate::store::save_config(&self.cfg);
+                                    }
+                                    handled = true;
+                                }
+                                PopAct::BriAll(_) => {
+                                    let cur = self.all_brightness.or(self.brightness).unwrap_or(50) as i32;
+                                    let next = (cur + change).clamp(0, 100) as u32;
+                                    self.set_all_bri(next);
+                                    handled = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if !handled {
+                        let cur = self.all_brightness.or(self.brightness).unwrap_or(50) as i32;
+                        let next = (cur + change).clamp(0, 100) as u32;
+                        self.set_all_bri(next);
+                    }
+                    self.render_pop();
+                    self.render_bar();
                 }
                 LRESULT(0)
             }

@@ -8,6 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 static FILTER_HWND: AtomicIsize = AtomicIsize::new(0);
 static FILTER_ENABLED: AtomicBool = AtomicBool::new(false);
 static FILTER_OPACITY: AtomicU8 = AtomicU8::new(0);
+static FILTER_COLOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 unsafe extern "system" fn filter_wndproc(
     hwnd: HWND,
@@ -22,8 +23,16 @@ unsafe extern "system" fn filter_wndproc(
             let hdc = HDC(wp.0 as *mut _);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
-            let brush = GetStockObject(BLACK_BRUSH);
-            let _ = FillRect(hdc, &rc, HBRUSH(brush.0));
+            let color = FILTER_COLOR.load(Ordering::SeqCst);
+            let brush = if color == 0 {
+                HBRUSH(GetStockObject(BLACK_BRUSH).0)
+            } else {
+                CreateSolidBrush(COLORREF(color))
+            };
+            let _ = FillRect(hdc, &rc, brush);
+            if color != 0 {
+                let _ = DeleteObject(brush.into());
+            }
             LRESULT(1)
         }
         WM_PAINT => {
@@ -31,8 +40,16 @@ unsafe extern "system" fn filter_wndproc(
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
-            let brush = GetStockObject(BLACK_BRUSH);
-            let _ = FillRect(hdc, &rc, HBRUSH(brush.0));
+            let color = FILTER_COLOR.load(Ordering::SeqCst);
+            let brush = if color == 0 {
+                HBRUSH(GetStockObject(BLACK_BRUSH).0)
+            } else {
+                CreateSolidBrush(COLORREF(color))
+            };
+            let _ = FillRect(hdc, &rc, brush);
+            if color != 0 {
+                let _ = DeleteObject(brush.into());
+            }
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -150,6 +167,22 @@ pub fn set_filter(enabled: bool, percent: u32) {
 #[allow(dead_code)]
 pub fn is_enabled() -> bool {
     FILTER_ENABLED.load(Ordering::SeqCst)
+}
+
+pub fn set_filter_tint(amber: bool) {
+    // 0 = Neutral Black, 0x000F50A0 = Warm Sunset Amber (0x00BBGGRR -> R=160, G=80, B=15)
+    FILTER_COLOR.store(if amber { 0x000F50A0 } else { 0 }, Ordering::SeqCst);
+    if let Some(hwnd) = filter_hwnd() {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            let _ = UpdateWindow(hwnd);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn is_amber() -> bool {
+    FILTER_COLOR.load(Ordering::SeqCst) != 0
 }
 
 #[allow(dead_code)]

@@ -649,6 +649,36 @@ pub fn brightness_set(percent: u32) {
     brightness_set_all(percent);
 }
 
+/// Turn off monitor power immediately (puts displays to sleep; mouse move or keypress wakes them).
+pub fn turn_off_screens() {
+    unsafe {
+        // HWND_BROADCAST = 0xFFFF, WM_SYSCOMMAND = 0x0112, SC_MONITORPOWER = 0xF170, 2 = MONITOR_OFF
+        let _ = PostMessageW(
+            Some(HWND(0xFFFF as *mut _)),
+            WM_SYSCOMMAND,
+            WPARAM(0xF170),
+            LPARAM(2),
+        );
+    }
+}
+
+/// Get elapsed seconds since the last user input (mouse move/click or keyboard press).
+pub fn get_idle_seconds() -> u32 {
+    unsafe {
+        let mut lii = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if GetLastInputInfo(&mut lii).as_bool() {
+            let now = windows::Win32::System::SystemInformation::GetTickCount();
+            if now >= lii.dwTime {
+                return (now - lii.dwTime) / 1000;
+            }
+        }
+        0
+    }
+}
+
 // ------------------------------------------------------- status bar helpers
 
 /// True when Windows is set to the light theme for the system UI (taskbar etc.).
