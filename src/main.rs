@@ -358,8 +358,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             match wp.0 {
                 2 => a.toggle_tucked(),
                 3 => a.quick_capture(),
-                4 | 6 => a.adjust_brightness(5),
-                5 | 7 => a.adjust_brightness(-5),
+                4 | 6 => a.adjust_brightness(a.cfg.bri_step as i32),
+                5 | 7 => a.adjust_brightness(-(a.cfg.bri_step as i32)),
                 _ => a.toggle_pinned_open(),
             }
         }
@@ -554,6 +554,28 @@ fn on_tray(hwnd: HWND, a: &mut App, lp: LPARAM) {
             }
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 160, w!("Turn off display(s)"));
+        if let Ok(sub) = CreatePopupMenu() {
+            let cur = a.cfg.oled_idle_min;
+            for (i, (mins, name)) in [(0u8, w!("Off")), (2, w!("After 2 minutes")), (5, w!("After 5 minutes")), (10, w!("After 10 minutes")), (15, w!("After 15 minutes"))].into_iter().enumerate() {
+                let m = if cur == mins { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = AppendMenuW(sub, MF_STRING | m, 161 + i, name);
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("OLED auto-dimming"));
+        }
+        if let Ok(sub) = CreatePopupMenu() {
+            let cur = a.cfg.bri_step;
+            for (i, (step, name)) in [(1u8, w!("1%")), (2, w!("2%")), (5, w!("5% (default)")), (10, w!("10%")), (15, w!("15%")), (20, w!("20%"))].into_iter().enumerate() {
+                let m = if cur == step { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = AppendMenuW(sub, MF_STRING | m, 170 + i, name);
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Brightness hotkey step"));
+        }
+        let amb = if a.cfg.filter_amber { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | amb, 176, w!("Warm amber night dimmer tint"));
+        let rem = if a.cfg.remember_bri { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | rem, 177, w!("Remember last brightness"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | auto, 1, w!("Start with Windows"));
         let sm = if a.cfg.start_menu { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | sm, 14, w!("Show in Start menu and search"));
@@ -610,6 +632,11 @@ fn on_tray(hwnd: HWND, a: &mut App, lp: LPARAM) {
             70..=74 => a.set_water_min([0u16, 30, 45, 60, 90][(cmd.0 - 70) as usize]),
             100..=116 => a.set_monitor((cmd.0 - 100) as u8),
             131..=150 => a.play_scene((cmd.0 - 131) as usize),
+            160 => sys::turn_off_screens(),
+            161..=165 => a.set_oled_idle_min([0u8, 2, 5, 10, 15][(cmd.0 - 161) as usize]),
+            170..=175 => a.set_bri_step([1u8, 2, 5, 10, 15, 20][(cmd.0 - 170) as usize]),
+            176 => a.toggle_filter_amber(),
+            177 => a.toggle_remember_bri(),
             9 => {
                 // Clean up, then end the process outright so no helper thread,
                 // hook or COM apartment can keep notch.exe alive.
